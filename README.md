@@ -52,9 +52,11 @@ cargo build --release
 On Linux, your user must have permission to access serial ports (usually `/dev/ttyUSB0` or `/dev/ttyACM0`).
 
 1. Add your user to the `dialout` (or `uucp` on Arch Linux) group:
+
    ```bash
    sudo usermod -a -G dialout $USER
    ```
+
 2. **Log out and log back in** for changes to take effect.
 
 ### 🍎 macOS
@@ -73,7 +75,7 @@ No special setup is required. Windows usually assigns a `COM` port automatically
 | Context        | Key                   | Action                       |
 | -------------- | --------------------- | ---------------------------- |
 | **Navigation** | `↑` / `↓` / `k` / `j` | Move selection / Scroll logs |
-|                | `Home` / \`End\`      | Scroll to top / bottom       |
+|                | `Home` / `End`        | Scroll to top / bottom       |
 |                | `PageUp` / `PageDown` | Fast scroll                  |
 | **Selection**  | `Enter`               | Confirm Port / Baud Rate     |
 | **Monitoring** | `s`                   | Start / Stop Connection      |
