@@ -1,4 +1,4 @@
-# 🔌 Serial TUI Monitor
+# 🔌 Serial Port Listener TUI
 
 A lightweight, cross-platform, Terminal User Interface (TUI) for monitoring serial ports, built with Rust and Ratatui.
 
@@ -23,7 +23,9 @@ A lightweight, cross-platform, Terminal User Interface (TUI) for monitoring seri
 If you have Rust installed, you can build and install directly from the source:
 
 ```bash
-git clone https://github.com/kullaniciadi/serial-tui.git cd serial-tui cargo install --path  .
+git clone https://github.com/noumanimpra/Serial-Port-Listener-TUI.git
+cd Serial-Port-Listener-TUI
+cargo install --path  .
 ```
 
 ### Option 2: Build from Source
@@ -31,8 +33,8 @@ git clone https://github.com/kullaniciadi/serial-tui.git cd serial-tui cargo ins
 ```bash
 # Clone the repository
 
-git clone https://github.com/kullaniciadi/serial-tui.git
-cd serial-tui
+git clone https://github.com/kullaniciadi/Serial-Port-Listener-TUI.git
+cd Serial-Port-Listener-TUI
 
 # Build for release
 
@@ -40,7 +42,7 @@ cargo build --release
 
 # Run the binary
 
-./target/release/serial-tui
+./target/release/Serial-Port-Listener-TUI
 ```
 
 ## 🖥️ Operating System Specific Setup
