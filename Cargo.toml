@@ -1,0 +1,17 @@
+[package]
+name = "serial_port_listener"
+version = "0.1.0"
+edition = "2024"
+authors = ["noumanimpra"]
+description = "A cross-platform TUI serial port monitor written in Rust."
+license = "MIT"
+repository = "https://github.com/kullaniciadi/seriallistener-tui"
+keywords = ["cli", "tui", "serial", "uart", "monitor"]
+
+[dependencies]
+ratatui = "0.26"
+crossterm = "0.27"
+serialport = "4.2" 
+anyhow = "1.0"
+chrono = "0.4"
+std-semaphore = "0.1.0"
