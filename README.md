@@ -33,7 +33,7 @@ cargo install --path  .
 ```bash
 # Clone the repository
 
-git clone https://github.com/kullaniciadi/Serial-Port-Listener-TUI.git
+git clone https://github.com/noumanimpra/Serial-Port-Listener-TUI.git
 cd Serial-Port-Listener-TUI
 
 # Build for release
