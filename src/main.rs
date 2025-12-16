@@ -59,6 +59,7 @@ struct LogEntry {
 struct Application {
     mode: Mode,
     available_ports: Vec<SerialPortInfo>,
+    current_line_buffer: String,
 
     // Configuration
     baud_rate_options: Vec<u32>,
@@ -82,6 +83,7 @@ struct Application {
     // Statistics
     total_bytes: usize,
     connection_time: Option<std::time::Instant>,
+    log_area_height: usize,
 }
 
 impl Application {
@@ -124,6 +126,8 @@ impl Application {
             is_connected: false,
             total_bytes: 0,
             connection_time: None,
+            current_line_buffer: String::new(),
+            log_area_height: 0,
         })
     }
 
@@ -134,17 +138,22 @@ impl Application {
     }
 
     fn scroll_log_down(&mut self, max_visible: usize) {
-        if self.log_buffer.len() > max_visible {
-            let max_offset = self.log_buffer.len() - max_visible;
-            if self.log_scroll_offset < max_offset {
-                self.log_scroll_offset += 1;
-            }
+        // Eğer buffer boşsa veya ekrana sığıyorsa işlem yapma
+        if self.log_buffer.len() <= max_visible {
+            return;
+        }
+
+        // Güvenli hesaplama: Toplam satır - Görünebilir alan
+        let max_offset = self.log_buffer.len().saturating_sub(max_visible);
+
+        if self.log_scroll_offset < max_offset {
+            self.log_scroll_offset += 1;
         }
     }
 
     fn scroll_to_bottom(&mut self, max_visible: usize) {
         if self.log_buffer.len() > max_visible {
-            self.log_scroll_offset = self.log_buffer.len() - max_visible;
+            self.log_scroll_offset = self.log_buffer.len().saturating_sub(max_visible);
         } else {
             self.log_scroll_offset = 0;
         }
@@ -504,12 +513,12 @@ fn draw_monitoring_mode(f: &mut Frame, area: Rect, app: &mut Application) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(6), // Statistics
-            Constraint::Min(0),    // Log area
+            Constraint::Length(6), // İstatistik alanı
+            Constraint::Min(0),    // Log alanı
         ])
         .split(area);
 
-    // Statistics
+    // --- İstatistik Alanı ---
     let connection_duration = if let Some(time) = app.connection_time {
         let elapsed = time.elapsed().as_secs();
         format!(
@@ -569,8 +578,15 @@ fn draw_monitoring_mode(f: &mut Frame, area: Rect, app: &mut Application) {
 
     f.render_widget(stats_widget, chunks[0]);
 
-    // Log area - Calculate actual visible height
+    // --- Log Alanı ---
+
+    // 1. Gerçek görünür yüksekliği hesapla (Kenarlıklar için -2)
     let max_visible = (chunks[1].height as usize).saturating_sub(2);
+
+    // 2. KRİTİK DÜZELTME: Bu yüksekliği struct içine kaydet.
+    // Böylece main döngüsü "PageDown" veya "Down" tuşuna basıldığında
+    // kaç satır kaydıracağını bilecek.
+    app.log_area_height = max_visible;
 
     let log_items: Vec<ListItem> = app
         .log_buffer
@@ -655,36 +671,39 @@ fn main() -> Result<()> {
 
         // Process messages from port thread
         let mut new_data_arrived = false;
+        // Main fonksiyonu içindeki while döngüsünde:
         while let Ok(message) = app.port_message_rx.try_recv() {
             match message {
                 PortMessage::Data(data) => {
                     app.total_bytes += data.len();
 
-                    // Split data by newlines and add each line separately
-                    for line in data.lines() {
-                        if !line.is_empty() {
-                            app.add_log_entry(line.to_string());
+                    // 1. Gelen veriyi geçici buffer'a ekle
+                    app.current_line_buffer.push_str(&data);
+
+                    // 2. Buffer içinde '\n' (yeni satır) var mı diye bak
+                    while let Some(pos) = app.current_line_buffer.find('\n') {
+                        // '\n' karakterine kadar olan kısmı kesip al
+                        // drain kullanarak buffer'ın başını alıyoruz, kalanı buffer'da kalıyor
+                        let line: String = app.current_line_buffer.drain(..=pos).collect();
+
+                        // Satır sonundaki boşlukları (\n, \r) temizle
+                        let trimmed_line = line.trim_end().to_string();
+
+                        // Eğer satır boş değilse loglara ekle
+                        if !trimmed_line.is_empty() {
+                            app.add_log_entry(trimmed_line);
                             new_data_arrived = true;
                         }
                     }
-                    // If data doesn't end with newline, add the last part
-                    if !data.ends_with('\n') && !data.is_empty() {
-                        if let Some(last) = data.lines().last() {
-                            if !last.is_empty() {
-                                // Check if we already added this line
-                                let already_exists =
-                                    app.log_buffer.iter().rev().take(5).any(|e| e.data == last);
-                                if !already_exists {
-                                    app.add_log_entry(last.to_string());
-                                    new_data_arrived = true;
-                                }
-                            }
-                        }
-                    }
+                    // Döngü bittiğinde buffer'da '\n' kalmamıştır.
+                    // Yarım kalan veri (örn: "Conv") buffer'da bekler,
+                    // bir sonraki veri geldiğinde ("erted") onunla birleşir.
                 }
                 PortMessage::Connected => {
                     app.is_connected = true;
                     app.connection_time = Some(std::time::Instant::now());
+                    // Bağlandığında buffer'ı temizlemek iyi bir fikirdir
+                    app.current_line_buffer.clear();
                 }
                 PortMessage::Disconnected => {
                     app.is_connected = false;
@@ -701,7 +720,7 @@ fn main() -> Result<()> {
         if new_data_arrived && app.mode == Mode::Monitoring && app.is_connected {
             // Force scroll to the very bottom
             if app.log_buffer.len() > 0 {
-                app.log_scroll_offset = app.log_buffer.len().saturating_sub(1);
+                app.log_scroll_offset = app.log_buffer.len().saturating_sub(app.log_area_height);
             }
         }
 
@@ -772,9 +791,9 @@ fn main() -> Result<()> {
                                     app.total_bytes = 0;
                                 }
                                 KeyCode::Up => app.scroll_log_up(),
-                                KeyCode::Down => app.scroll_log_down(30),
+                                KeyCode::Down => app.scroll_log_down(app.log_area_height),
                                 KeyCode::Home => app.scroll_to_top(),
-                                KeyCode::End => app.scroll_to_bottom(30),
+                                KeyCode::End => app.scroll_to_bottom(app.log_area_height),
                                 KeyCode::PageUp => {
                                     for _ in 0..10 {
                                         app.scroll_log_up();
@@ -782,7 +801,7 @@ fn main() -> Result<()> {
                                 }
                                 KeyCode::PageDown => {
                                     for _ in 0..10 {
-                                        app.scroll_log_down(30);
+                                        app.scroll_log_down(app.log_area_height); // Burayı da güncelleyin
                                     }
                                 }
                                 _ => {}
