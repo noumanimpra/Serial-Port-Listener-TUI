@@ -4,10 +4,12 @@
  */
 
 use std::{
-    io::{self, stdout},
+    fs::{self, File}, // fs modülü eklendi
+    io::{self, Write, stdout},
+    path::PathBuf, // PathBuf eklendi
     sync::mpsc::{self, Receiver, Sender},
     thread,
-    time::Duration,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Result;
@@ -22,7 +24,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
 use serialport::{SerialPortInfo, available_ports};
 
@@ -84,6 +86,10 @@ struct Application {
     total_bytes: usize,
     connection_time: Option<std::time::Instant>,
     log_area_height: usize,
+
+    // Notification System
+    notification_message: Option<String>,
+    notification_timer: Option<Instant>,
 }
 
 impl Application {
@@ -128,6 +134,8 @@ impl Application {
             connection_time: None,
             current_line_buffer: String::new(),
             log_area_height: 0,
+            notification_message: None,
+            notification_timer: None,
         })
     }
 
@@ -138,14 +146,10 @@ impl Application {
     }
 
     fn scroll_log_down(&mut self, max_visible: usize) {
-        // Eğer buffer boşsa veya ekrana sığıyorsa işlem yapma
         if self.log_buffer.len() <= max_visible {
             return;
         }
-
-        // Güvenli hesaplama: Toplam satır - Görünebilir alan
         let max_offset = self.log_buffer.len().saturating_sub(max_visible);
-
         if self.log_scroll_offset < max_offset {
             self.log_scroll_offset += 1;
         }
@@ -164,14 +168,10 @@ impl Application {
     }
 
     fn add_log_entry(&mut self, data: String) {
-        use std::time::{SystemTime, UNIX_EPOCH};
-
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-
         let total_secs = now.as_secs();
         let millis = now.subsec_millis();
 
-        // Convert to local time (hours, minutes, seconds)
         let secs_in_day = total_secs % 86400;
         let hours = (secs_in_day / 3600) as u32;
         let minutes = ((secs_in_day % 3600) / 60) as u32;
@@ -185,9 +185,68 @@ impl Application {
     fn toggle_timestamps(&mut self) {
         self.show_timestamps = !self.show_timestamps;
     }
+
+    // --- GÜNCELLENMİŞ KAYDETME FONKSİYONU ---
+    fn save_logs_to_file(&mut self) {
+        if self.log_buffer.is_empty() {
+            self.show_notification("Nothing to save!".to_string());
+            return;
+        }
+
+        // 1. "logs" klasörünü oluştur (varsa hata vermez)
+        if let Err(e) = fs::create_dir_all("logs") {
+            self.show_notification(format!("Error creating directory: {}", e));
+            return;
+        }
+
+        // 2. Dosya yolunu hazırla (logs/log_xxxx.txt)
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let mut file_path = PathBuf::from("logs");
+        file_path.push(format!("log_{}.txt", timestamp));
+
+        let mut file_content = String::new();
+        file_content.push_str("--- Serial Port Monitor Log ---\n");
+        file_content.push_str(&format!(
+            "Port: {} | Baud: {}\n",
+            self.selected_port_name, self.selected_baud_rate
+        ));
+        file_content.push_str("-------------------------------\n\n");
+
+        for entry in &self.log_buffer {
+            file_content.push_str(&format!("[{}] {}\n", entry.timestamp, entry.data));
+        }
+
+        match File::create(&file_path).and_then(|mut f| f.write_all(file_content.as_bytes())) {
+            Ok(_) => {
+                // Kullanıcıya tam yolu göster (logs/log_123.txt)
+                self.show_notification(format!("Saved to {:?}", file_path));
+            }
+            Err(e) => {
+                self.show_notification(format!("Error saving file: {}", e));
+            }
+        }
+    }
+
+    fn show_notification(&mut self, message: String) {
+        self.notification_message = Some(message);
+        self.notification_timer = Some(Instant::now());
+    }
+
+    fn update_notification(&mut self) {
+        if let Some(timer) = self.notification_timer {
+            if timer.elapsed() > Duration::from_secs(3) {
+                self.notification_message = None;
+                self.notification_timer = None;
+            }
+        }
+    }
 }
 
-// Standalone functions - solves borrow checker issues
+// Standalone functions
 fn next_selection(list_length: usize, state: &mut ListState) {
     if list_length == 0 {
         return;
@@ -231,28 +290,25 @@ fn port_manager_thread(command_rx: Receiver<PortCommand>, message_tx: Sender<Por
     let mut serial_buf: Vec<u8> = vec![0; 4096];
 
     loop {
-        // Check for incoming commands
         if let Ok(command) = command_rx.try_recv() {
             match command {
-                PortCommand::Connect(name, baud) => {
-                    match serialport::new(&name, baud)
-                        .timeout(Duration::from_millis(10))
-                        .open()
-                    {
-                        Ok(port) => {
-                            port_open = Some(port);
-                            let _ = message_tx.send(PortMessage::Connected);
-                            let _ = message_tx.send(PortMessage::Data(format!(
-                                "┌─────────────────────────────────────────┐\n│ ✓ Connected: {} @ {} baud\n└─────────────────────────────────────────┘",
-                                name, baud
-                            )));
-                        }
-                        Err(e) => {
-                            let _ = message_tx
-                                .send(PortMessage::Error(format!("Failed to open port: {}", e)));
-                        }
+                PortCommand::Connect(name, baud) => match serialport::new(&name, baud)
+                    .timeout(Duration::from_millis(10))
+                    .open()
+                {
+                    Ok(port) => {
+                        port_open = Some(port);
+                        let _ = message_tx.send(PortMessage::Connected);
+                        let _ = message_tx.send(PortMessage::Data(format!(
+                            "┌─────────────────────────────────────────┐\n│ ✓ Connected: {} @ {} baud\n└─────────────────────────────────────────┘",
+                            name, baud
+                        )));
                     }
-                }
+                    Err(e) => {
+                        let _ = message_tx
+                            .send(PortMessage::Error(format!("Failed to open port: {}", e)));
+                    }
+                },
                 PortCommand::Disconnect => {
                     if port_open.is_some() {
                         port_open = None;
@@ -266,7 +322,6 @@ fn port_manager_thread(command_rx: Receiver<PortCommand>, message_tx: Sender<Por
             }
         }
 
-        // Read data if port is open
         if let Some(ref mut port) = port_open {
             match port.read(serial_buf.as_mut_slice()) {
                 Ok(t) if t > 0 => {
@@ -326,23 +381,16 @@ fn draw_ui(f: &mut Frame, app: &mut Application) {
 
     f.render_widget(header, main_layout[0]);
 
-    // --- Main Content ---
     match app.mode {
-        Mode::PortSelection => {
-            draw_port_selection(f, main_layout[1], app);
-        }
-        Mode::BaudSelection => {
-            draw_baud_selection(f, main_layout[1], app);
-        }
+        Mode::PortSelection => draw_port_selection(f, main_layout[1], app),
+        Mode::BaudSelection => draw_baud_selection(f, main_layout[1], app),
         Mode::Monitoring => {}
     }
 
-    // --- Footer ---
     draw_footer(f, main_layout[2], app);
 }
 
 fn draw_monitoring_layout(f: &mut Frame, app: &mut Application, areas: std::rc::Rc<[Rect]>) {
-    // Custom header for monitoring mode
     let status_text = if app.is_connected {
         "● CONNECTED"
     } else {
@@ -391,6 +439,44 @@ fn draw_monitoring_layout(f: &mut Frame, app: &mut Application, areas: std::rc::
 
     draw_monitoring_mode(f, areas[1], app);
     draw_footer(f, areas[2], app);
+
+    // --- POPUP: Notification ---
+    if let Some(msg) = &app.notification_message {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Green))
+            .title(" Notification ")
+            .title_style(Style::default().fg(Color::Green).bold());
+
+        let area = centered_rect(60, 20, f.size());
+        f.render_widget(Clear, area);
+        let paragraph = Paragraph::new(msg.as_str())
+            .block(block)
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(Color::White).bold());
+        f.render_widget(paragraph, area);
+    }
+}
+
+// Popup center helper
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
 }
 
 fn draw_port_selection(f: &mut Frame, area: Rect, app: &mut Application) {
@@ -513,12 +599,11 @@ fn draw_monitoring_mode(f: &mut Frame, area: Rect, app: &mut Application) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(6), // İstatistik alanı
-            Constraint::Min(0),    // Log alanı
+            Constraint::Length(6), // Statistics
+            Constraint::Min(0),    // Log area
         ])
         .split(area);
 
-    // --- İstatistik Alanı ---
     let connection_duration = if let Some(time) = app.connection_time {
         let elapsed = time.elapsed().as_secs();
         format!(
@@ -578,14 +663,7 @@ fn draw_monitoring_mode(f: &mut Frame, area: Rect, app: &mut Application) {
 
     f.render_widget(stats_widget, chunks[0]);
 
-    // --- Log Alanı ---
-
-    // 1. Gerçek görünür yüksekliği hesapla (Kenarlıklar için -2)
     let max_visible = (chunks[1].height as usize).saturating_sub(2);
-
-    // 2. KRİTİK DÜZELTME: Bu yüksekliği struct içine kaydet.
-    // Böylece main döngüsü "PageDown" veya "Down" tuşuna basıldığında
-    // kaç satır kaydıracağını bilecek.
     app.log_area_height = max_visible;
 
     let log_items: Vec<ListItem> = app
@@ -634,7 +712,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &Application) {
         Mode::PortSelection => "↑↓: Navigate  │  ENTER: Select  │  Q/ESC: Quit",
         Mode::BaudSelection => "↑↓: Navigate  │  ENTER: Select  │  Q/ESC: Quit",
         Mode::Monitoring => {
-            "S: Connect/Disconnect  │  T: Toggle Timestamps  │  C: Clear  │  ↑↓: Scroll  │  Q/ESC: Quit"
+            "S: Connect/Disconnect  │  W: Save Log  │  T: Timestamp  │  C: Clear  │  ↑↓: Scroll  │  Q/Quit"
         }
     };
 
@@ -669,40 +747,27 @@ fn main() -> Result<()> {
     while !should_quit {
         terminal.draw(|f| draw_ui(f, &mut app))?;
 
+        app.update_notification();
+
         // Process messages from port thread
         let mut new_data_arrived = false;
-        // Main fonksiyonu içindeki while döngüsünde:
         while let Ok(message) = app.port_message_rx.try_recv() {
             match message {
                 PortMessage::Data(data) => {
                     app.total_bytes += data.len();
-
-                    // 1. Gelen veriyi geçici buffer'a ekle
                     app.current_line_buffer.push_str(&data);
-
-                    // 2. Buffer içinde '\n' (yeni satır) var mı diye bak
                     while let Some(pos) = app.current_line_buffer.find('\n') {
-                        // '\n' karakterine kadar olan kısmı kesip al
-                        // drain kullanarak buffer'ın başını alıyoruz, kalanı buffer'da kalıyor
                         let line: String = app.current_line_buffer.drain(..=pos).collect();
-
-                        // Satır sonundaki boşlukları (\n, \r) temizle
                         let trimmed_line = line.trim_end().to_string();
-
-                        // Eğer satır boş değilse loglara ekle
                         if !trimmed_line.is_empty() {
                             app.add_log_entry(trimmed_line);
                             new_data_arrived = true;
                         }
                     }
-                    // Döngü bittiğinde buffer'da '\n' kalmamıştır.
-                    // Yarım kalan veri (örn: "Conv") buffer'da bekler,
-                    // bir sonraki veri geldiğinde ("erted") onunla birleşir.
                 }
                 PortMessage::Connected => {
                     app.is_connected = true;
                     app.connection_time = Some(std::time::Instant::now());
-                    // Bağlandığında buffer'ı temizlemek iyi bir fikirdir
                     app.current_line_buffer.clear();
                 }
                 PortMessage::Disconnected => {
@@ -716,15 +781,12 @@ fn main() -> Result<()> {
             }
         }
 
-        // Auto-scroll to bottom when new data arrives and we're in monitoring mode
         if new_data_arrived && app.mode == Mode::Monitoring && app.is_connected {
-            // Force scroll to the very bottom
             if app.log_buffer.len() > 0 {
                 app.log_scroll_offset = app.log_buffer.len().saturating_sub(app.log_area_height);
             }
         }
 
-        // Handle input
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
@@ -782,6 +844,9 @@ fn main() -> Result<()> {
                                             .ok();
                                     }
                                 }
+                                KeyCode::Char('w') | KeyCode::Char('W') => {
+                                    app.save_logs_to_file();
+                                }
                                 KeyCode::Char('t') | KeyCode::Char('T') => {
                                     app.toggle_timestamps();
                                 }
@@ -801,7 +866,7 @@ fn main() -> Result<()> {
                                 }
                                 KeyCode::PageDown => {
                                     for _ in 0..10 {
-                                        app.scroll_log_down(app.log_area_height); // Burayı da güncelleyin
+                                        app.scroll_log_down(app.log_area_height);
                                     }
                                 }
                                 _ => {}
